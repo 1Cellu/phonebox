@@ -337,6 +337,8 @@ public class LanTests
     [InlineData("/api/steam", true)]
     [InlineData("/api/steam/avatar", true)]
     [InlineData("/api/steam/other", false)]
+    [InlineData("/api/lyrics", true)]
+    [InlineData("/api/lyrics/search", false)]
     [InlineData("/api/push/temperature", true)]
     [InlineData("/api/settings", false)]
     [InlineData("/api/pair", false)]

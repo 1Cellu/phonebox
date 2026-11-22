@@ -97,6 +97,7 @@ AddMonitor<DockerMonitor>(builder.Services);
 AddMonitor<ObsMonitor>(builder.Services);
 AddMonitor<DiscordMonitor>(builder.Services);
 AddMonitor<SteamMonitor>(builder.Services);
+builder.Services.AddSingleton(sp => new LyricsService(sp.GetRequiredService<ConfigStore>(), sp.GetRequiredService<ILogger<LyricsService>>()));
 AddMonitor<BatteryMonitor>(builder.Services);
 AddMonitor<RuleEngine>(builder.Services);
 AddMonitor<ChargeGuard>(builder.Services);
@@ -686,6 +687,12 @@ app.MapGet("/api/steam", (SteamMonitor steam, ConfigStore cfg) =>
 app.MapGet("/api/steam/avatar", async (string id, SteamMonitor steam, CancellationToken ct) =>
     await steam.AvatarAsync(id, ct) is { } img
         ? Results.File(img.Data, img.Type, lastModified: null, entityTag: null, enableRangeProcessing: false) : Results.NotFound());
+
+// Synced lyrics of the track playing now, from LRCLIB, for the asking widget ("widget=pageId/widgetId"): only when that
+// widget is on an enabled page with "Look up lyrics on LRCLIB" on (the default; it can be turned off). The track is the agent's own media
+// snapshot: the phone sends no text that could reach LRCLIB.
+app.MapGet("/api/lyrics", async (string? widget, HttpRequest req, MediaMonitor media, LyricsService lyrics, CancellationToken ct) =>
+    Results.Json(await lyrics.ForAsync(media.Snapshot(), req.Headers["X-PhoneBox-Device"].ToString(), widget, ct)));
 
 // Battery levels of wireless devices (headphones, mice, keyboards…), for the Device batteries widget.
 app.MapGet("/api/batteries", (BatteryMonitor b) => Results.Json(new { devices = b.Snapshot() }));
