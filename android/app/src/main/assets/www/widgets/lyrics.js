@@ -53,7 +53,10 @@ W.lyrics = {
       if (loading || !result) { list.replaceChildren(); say(t('w.lyrics.loading')); return; }
       const s = result.status;
       if (s === 'off') { list.replaceChildren(); say(t('w.lyrics.off')); return; }
-      if (s === 'error') { list.replaceChildren(); say(t('w.lyrics.error')); return; }
+      // the agent found nothing to look up (a title that is all "(Official Video)", say): as with nothing playing
+      if (s === 'idle') { list.replaceChildren(); say(t('w.lyrics.idle')); return; }
+      // an error, or a status this version of the panel does not know
+      if (s !== 'ok' && s !== 'notfound') { list.replaceChildren(); say(t('w.lyrics.error')); return; }
       if (s === 'notfound' || (s === 'ok' && !result.instrumental && !lines.length && !(plainToo && result.plain))) {
         list.replaceChildren(); say(t('w.lyrics.notFound')); return;
       }

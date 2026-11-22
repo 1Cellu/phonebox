@@ -344,4 +344,58 @@ public sealed class LyricsServiceTests : IDisposable
         Assert.Equal("error", (await Ask(lyrics, Track("C", "Artist"))).Status);
         Assert.Equal(2, asked.Count);
     }
+
+    [Fact]
+    public async Task TheSearchFallbackWaitsOutABackOffStartedMeanwhile()
+    {
+        long now = 0;
+        var exact = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tooMany = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var asked = new List<string>();
+        var lrclib = new SlowLrclib(req =>
+        {
+            lock (asked) asked.Add(req.RequestUri!.PathAndQuery);
+            if (req.RequestUri!.AbsolutePath == "/api/get") return exact.Task;
+            return req.RequestUri!.Query.Contains("track_name=A") ? tooMany.Task : Task.FromResult(Json("[]"));
+        });
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib, () => now);
+
+        // B's exact match is under way when A is told to slow down for 10 minutes
+        var b = Ask(lyrics, Track("B", "Artist", "Album"));
+        var a = Ask(lyrics, Track("A", "Artist"));
+        for (var waited = 0; ; waited += 10)
+        {
+            lock (asked) if (asked.Count == 2) break;
+            Assert.True(waited < 5000, "both requests should reach LRCLIB");
+            await Task.Delay(10);
+        }
+        var slowDown = Json("{}", HttpStatusCode.TooManyRequests);
+        slowDown.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromMinutes(10));
+        tooMany.SetResult(slowDown);
+        Assert.Equal("error", (await a).Status);
+
+        // B's exact match is not found: its search would be a second request during the back-off, so it waits
+        exact.SetResult(Json("""{"code":404}""", HttpStatusCode.NotFound));
+        Assert.Equal("error", (await b).Status);
+        Assert.DoesNotContain(asked, q => q.StartsWith("/api/search?track_name=B"));
+        Assert.Equal(2, asked.Count);
+
+        // after the back-off, B is looked up again, search included
+        now = 10 * 60_000 + 1;
+        Assert.Equal("notfound", (await Ask(lyrics, Track("B", "Artist", "Album"))).Status);
+        Assert.Contains(asked, q => q.StartsWith("/api/search?track_name=B"));
+    }
+
+    [Fact]
+    public async Task ExpiredAnswersAreDroppedFromMemory()
+    {
+        long now = 0;
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, new Lrclib(_ => Json("[]")), () => now);
+        await Ask(lyrics, Track("A", "Artist"));
+        await Ask(lyrics, Track("B", "Artist"));
+        Assert.Equal(2, lyrics.CachedSongs);
+        now = 31 * 60_000; // both misses expired
+        await Ask(lyrics, Track("C", "Artist"));
+        Assert.Equal(1, lyrics.CachedSongs);
+    }
 }

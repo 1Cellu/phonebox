@@ -96,15 +96,19 @@ public sealed partial class LyricsService : IDisposable
     {
         LyricsResult result;
         long keep;
-        long quiet;
-        lock (_gate) quiet = _quietUntil - _clock();
         // LRCLIB failed a moment ago: no request until the back-off is over; the song is asked again after it
-        if (quiet > 0) return Remember(title, artist, album, seconds, new LyricsResult("error"), quiet);
+        if (PausedFor() is > 0 and var quiet) return Remember(title, artist, album, seconds, new LyricsResult("error"), quiet);
         try
         {
             result = await Fetch(title, artist, album, seconds);
             keep = result.Status == "ok" ? 6 * 3600_000L : 30 * 60_000L;
             lock (_gate) _failures = 0;
+        }
+        catch (LrclibPausedException paused)
+        {
+            // another lookup failed while this one was under way: wait for the same back-off, without counting a failure
+            result = new LyricsResult("error");
+            keep = paused.LeftMs;
         }
         catch (Exception ex)
         {
@@ -123,15 +127,33 @@ public sealed partial class LyricsService : IDisposable
         return Remember(title, artist, album, seconds, result, keep);
     }
 
+    /// <summary>How many answers are held now (tests: expired ones are dropped).</summary>
+    internal int CachedSongs
+    {
+        get { lock (_gate) return _cache.Count; }
+    }
+
+    /// <summary>How long LRCLIB is still left alone after a failure (ms), or 0.</summary>
+    private long PausedFor()
+    {
+        lock (_gate) return Math.Max(0, _quietUntil - _clock());
+    }
+
+    /// <summary>
+    /// Keeps an answer for <paramref name="keep"/> ms. Answers that are no longer valid are dropped here, so the songs held
+    /// in memory are only the ones that would still be used, at most <see cref="CacheSize"/>.
+    /// </summary>
     private LyricsResult Remember(string title, string artist, string album, int seconds, LyricsResult result, long keep)
     {
         var key = string.Join('\n', artist, title, album, seconds).ToLowerInvariant();
         lock (_gate)
         {
+            var now = _clock();
+            foreach (var gone in _cache.Where(kv => kv.Value.Until <= now).Select(kv => kv.Key).ToList()) _cache.Remove(gone);
             if (_cache.Count >= CacheSize && !_cache.ContainsKey(key))
                 foreach (var old in _cache.OrderBy(kv => kv.Value.Until).Take(_cache.Count - CacheSize + 1).Select(kv => kv.Key).ToList())
                     _cache.Remove(old);
-            _cache[key] = (result, _clock() + keep);
+            _cache[key] = (result, now + keep);
         }
         return result;
     }
@@ -151,6 +173,8 @@ public sealed partial class LyricsService : IDisposable
             }
             else if (res.StatusCode != HttpStatusCode.NotFound) throw Refused(res);
         }
+        // a failure of another lookup may have started a back-off meanwhile: no second request during it
+        if (PausedFor() is > 0 and var left) throw new LrclibPausedException(left);
         var search = $"/api/search?track_name={Uri.EscapeDataString(title)}" + (artist.Length > 0 ? $"&artist_name={Uri.EscapeDataString(artist)}" : "");
         using (var res = await _http.GetAsync(search))
         {
@@ -226,6 +250,12 @@ public sealed partial class LyricsService : IDisposable
     private static partial Regex Spaces();
 
     public void Dispose() => _http.Dispose();
+}
+
+/// <summary>A lookup that reached a back-off started by another one (LRCLIB is left alone for <see cref="LeftMs"/>).</summary>
+internal sealed class LrclibPausedException(long leftMs) : Exception("LRCLIB is paused after a failure")
+{
+    public long LeftMs { get; } = leftMs;
 }
 
 /// <summary>LRCLIB answered with an error status (429 when asked too often, 5xx when it is down).</summary>

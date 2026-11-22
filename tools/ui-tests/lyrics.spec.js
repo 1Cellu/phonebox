@@ -159,3 +159,32 @@ test('an answer to an older request does not replace the newer one (A → B → 
   await expect(lyrics.locator('.ly-note')).toHaveText('These lyrics are not timed');
   expect(errors).toEqual([]);
 });
+
+test('nothing the agent can look up reads as nothing playing, never as empty lyrics', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/panel/');
+  await page.evaluate(() => {
+    localStorage.setItem('pb-demo-config', JSON.stringify({ night: { enabled: false }, shortcuts: [],
+      pages: [{ id: 'test', title: 'Test', enabled: true, widgets: [{ id: 'l', type: 'lyrics', x: 0, y: 0, w: 12, h: 6, options: { lookup: true } }] }] }));
+  });
+  await page.reload();
+  const lyrics = page.locator('.w-lyrics');
+  await expect(lyrics).toHaveClass(/timed/);
+  // the agent answers "idle" (a title it can't look up), then a status this panel doesn't know
+  await page.evaluate(() => {
+    const real = window.fetch;
+    window.__lyricsAnswer = { status: 'idle' };
+    window.fetch = (url, ...rest) => String(url).includes('/api/lyrics')
+      ? Promise.resolve(new Response(JSON.stringify(window.__lyricsAnswer), { headers: { 'content-type': 'application/json' } }))
+      : real(url, ...rest);
+  });
+  await page.evaluate(() => fetch('/agent/api/media/next', { method: 'POST' }));
+  await expect(lyrics.locator('.ly-note')).toHaveText('Nothing playing', { timeout: 8000 });
+  await expect(lyrics.locator('.ly-line')).toHaveCount(0);
+  await expect(lyrics).not.toContainText('undefined');
+  await page.evaluate(() => { window.__lyricsAnswer = { status: 'later' }; });
+  await page.evaluate(() => fetch('/agent/api/media/next', { method: 'POST' }));
+  await expect(lyrics.locator('.ly-note')).toHaveText('Lyrics are unavailable right now', { timeout: 8000 });
+  await expect(lyrics).not.toContainText('undefined');
+  expect(errors).toEqual([]);
+});
