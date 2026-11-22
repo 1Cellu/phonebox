@@ -354,8 +354,14 @@ public sealed class LyricsServiceTests : IDisposable
         var asked = new List<string>();
         var lrclib = new SlowLrclib(req =>
         {
-            lock (asked) asked.Add(req.RequestUri!.PathAndQuery);
-            if (req.RequestUri!.AbsolutePath == "/api/get") return exact.Task;
+            int n;
+            lock (asked)
+            {
+                asked.Add(req.RequestUri!.PathAndQuery);
+                n = asked.Count(q => q.StartsWith("/api/get"));
+            }
+            // the first exact match waits for the test; later ones answer at once, each with its own response
+            if (req.RequestUri!.AbsolutePath == "/api/get") return n == 1 ? exact.Task : Task.FromResult(Json("""{"code":404}""", HttpStatusCode.NotFound));
             return req.RequestUri!.Query.Contains("track_name=A") ? tooMany.Task : Task.FromResult(Json("[]"));
         });
         using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib, () => now);
