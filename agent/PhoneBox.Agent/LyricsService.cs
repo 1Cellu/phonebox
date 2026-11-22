@@ -70,7 +70,9 @@ public sealed partial class LyricsService : IDisposable
         Task<LyricsResult> task;
         lock (_gate)
         {
-            if (_cache.TryGetValue(key, out var hit) && hit.Until > _clock()) return hit.Result with { Title = title, Artist = artist };
+            var now = _clock();
+            Prune(now); // an answer that expired goes now, even when this one comes from the cache
+            if (_cache.TryGetValue(key, out var hit) && hit.Until > now) return hit.Result with { Title = title, Artist = artist };
             // one request per song, however many phones or widgets ask at once: the lookup is started under the lock, so
             // only one caller starts it and the others wait for that one. A finished lookup that is still listed has had
             // its answer cached (LookUp caches before it completes), and that answer has expired since: start a new one.
@@ -139,9 +141,15 @@ public sealed partial class LyricsService : IDisposable
         lock (_gate) return Math.Max(0, _quietUntil - _clock());
     }
 
+    /// <summary>Drops the answers that are no longer valid (call with <see cref="_gate"/> held).</summary>
+    private void Prune(long now)
+    {
+        foreach (var gone in _cache.Where(kv => kv.Value.Until <= now).Select(kv => kv.Key).ToList()) _cache.Remove(gone);
+    }
+
     /// <summary>
-    /// Keeps an answer for <paramref name="keep"/> ms. Answers that are no longer valid are dropped here, so the songs held
-    /// in memory are only the ones that would still be used, at most <see cref="CacheSize"/>.
+    /// Keeps an answer for <paramref name="keep"/> ms, at most <see cref="CacheSize"/> songs. Expired answers are dropped
+    /// whenever lyrics are asked for (and here), so memory holds only answers that would still be used.
     /// </summary>
     private LyricsResult Remember(string title, string artist, string album, int seconds, LyricsResult result, long keep)
     {
@@ -149,7 +157,7 @@ public sealed partial class LyricsService : IDisposable
         lock (_gate)
         {
             var now = _clock();
-            foreach (var gone in _cache.Where(kv => kv.Value.Until <= now).Select(kv => kv.Key).ToList()) _cache.Remove(gone);
+            Prune(now);
             if (_cache.Count >= CacheSize && !_cache.ContainsKey(key))
                 foreach (var old in _cache.OrderBy(kv => kv.Value.Until).Take(_cache.Count - CacheSize + 1).Select(kv => kv.Key).ToList())
                     _cache.Remove(old);

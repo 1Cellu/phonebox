@@ -396,12 +396,22 @@ public sealed class LyricsServiceTests : IDisposable
     public async Task ExpiredAnswersAreDroppedFromMemory()
     {
         long now = 0;
-        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, new Lrclib(_ => Json("[]")), () => now);
+        // B is found (kept 6 h), A and C are not (30 min)
+        var lrclib = new Lrclib(req => req.RequestUri!.Query.Contains("track_name=B")
+            ? Json("""[{"id":1,"duration":200,"instrumental":false,"plainLyrics":"b","syncedLyrics":"[00:01.00] b"}]""")
+            : Json("[]"));
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib, () => now);
         await Ask(lyrics, Track("A", "Artist"));
         await Ask(lyrics, Track("B", "Artist"));
         Assert.Equal(2, lyrics.CachedSongs);
-        now = 31 * 60_000; // both misses expired
-        await Ask(lyrics, Track("C", "Artist"));
+
+        // A's miss has expired; asking for B, answered from memory, already drops it
+        now = 31 * 60_000;
+        Assert.Equal("ok", (await Ask(lyrics, Track("B", "Artist"))).Status);
         Assert.Equal(1, lyrics.CachedSongs);
+        Assert.Equal(2, lrclib.Asked.Count); // B came from memory
+
+        await Ask(lyrics, Track("C", "Artist"));
+        Assert.Equal(2, lyrics.CachedSongs);
     }
 }
