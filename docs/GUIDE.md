@@ -160,9 +160,9 @@ The **Synced lyrics** widget shows the words of the song playing on the computer
 middle, from [LRCLIB](https://lrclib.net), a free and open lyrics database. It isn't tied to Spotify: it uses the track
 the agent shows in Now playing (title, artist, album, length and position), whichever player reports it.
 
-The lookup starts when you add the widget: its **Look up lyrics on LRCLIB** is on by default, and each widget has its
-own switch to turn it off. The agent (never the phone) asks LRCLIB once per song, only for a widget with the option on
-while it is on an enabled page, and sends the title, artist, album and length, nothing about you. Answers stay in memory, never on disk; after a failure the agent
+Nothing is looked up until you turn on the widget's **Look up lyrics on LRCLIB** (off by default); each widget has its
+own switch. Then the agent (never the phone) asks LRCLIB once per song, only for a widget with the option on while it
+is on an enabled page, and sends the title, artist, album and length, nothing about you. Answers stay in memory, never on disk; after a failure the agent
 leaves LRCLIB alone for a while (1 minute, doubling up to 30, or as long as LRCLIB asks).
 
 Songs without timed lyrics show their plain lyrics, unless you turn that off. A player that reports no position (no

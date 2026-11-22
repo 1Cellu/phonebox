@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -13,8 +12,8 @@ public sealed record LyricsResult(string Status, string? Title = null, string? A
 
 /// <summary>
 /// Lyrics from LRCLIB (https://lrclib.net), a free and open lyrics database that needs no account or key. The agent asks
-/// it, not the phone, and only for a Synced lyrics widget on an enabled page whose "Look up lyrics on LRCLIB" is on (the
-/// default for a widget the user adds; it can be turned off per widget); it
+/// it, not the phone, and only for a Synced lyrics widget on an enabled page whose "Look up lyrics on LRCLIB" is turned on
+/// (off by default, per widget); it
 /// sends the title, artist, album and length of the track playing now, nothing else. Answers are kept in memory only
 /// (a found track for 6 hours, a miss for 30 minutes, at most <see cref="CacheSize"/> songs), so a song is looked up
 /// once however often the phones ask. After a failure no request goes to LRCLIB for a while, longer after each failure
@@ -32,7 +31,7 @@ public sealed partial class LyricsService : IDisposable
     private readonly Func<long> _clock;
     private readonly Lock _gate = new();
     private readonly Dictionary<string, (LyricsResult Result, long Until)> _cache = [];
-    private readonly ConcurrentDictionary<string, Task<LyricsResult>> _pending = new();
+    private readonly Dictionary<string, Task<LyricsResult>> _pending = []; // the lookup under way per song, under _gate
     private int _failures;   // failed lookups in a row
     private long _quietUntil; // no request to LRCLIB before this (clock ms), after a failure
 
@@ -51,13 +50,12 @@ public sealed partial class LyricsService : IDisposable
     }
 
     /// <summary>
-    /// The lookup is per widget: <paramref name="widget"/> ("pageId/widgetId", or "pageId/stackId:cardId" for a Smart Stack
-    /// card) must be a Synced lyrics widget on an enabled page this phone shows, with "Look up lyrics on LRCLIB" not turned
-    /// off (it is on unless the widget's settings say false). Another widget's option does not count, and no widget, a
-    /// widget of another type or one on a disabled page never asks.
+    /// The lookup is per widget and off by default: <paramref name="widget"/> ("pageId/widgetId", or "pageId/stackId:cardId"
+    /// for a Smart Stack card) must be a Synced lyrics widget on an enabled page this phone shows, with "Look up lyrics on
+    /// LRCLIB" explicitly turned on. Another widget's option does not count.
     /// </summary>
     public bool Wanted(string? deviceId, string? widget) =>
-        PanelWidgets.Find(_config.Get(), deviceId, widget, "lyrics") is { } w && w.Bool("lookup") != false;
+        PanelWidgets.Find(_config.Get(), deviceId, widget, "lyrics")?.Bool("lookup") == true;
 
     /// <summary>The lyrics of the track playing now (or paused), as the asking widget shows them.</summary>
     public async Task<LyricsResult> ForAsync(MediaSnapshot? media, string? deviceId, string? widget, CancellationToken ct)
@@ -69,23 +67,29 @@ public sealed partial class LyricsService : IDisposable
         var album = media.Album?.Trim() ?? "";
         var seconds = media.DurMs > 0 ? (int)Math.Round(media.DurMs / 1000.0) : 0;
         var key = string.Join('\n', artist, title, album, seconds).ToLowerInvariant();
-        for (var attempt = 0; ; attempt++)
+        Task<LyricsResult> task;
+        lock (_gate)
         {
-            lock (_gate)
-                if (_cache.TryGetValue(key, out var hit) && hit.Until > _clock()) return hit.Result with { Title = title, Artist = artist };
-            // one request per song, however many phones or widgets ask at once; it is not cancelled when one of them gives up
-            var task = _pending.GetOrAdd(key, _ => Task.Run(() => LookUp(title, artist, album, seconds)));
-            // a request that finished earlier and is still listed: its answer was cached and has expired since
-            if (task.IsCompleted && attempt == 0)
+            if (_cache.TryGetValue(key, out var hit) && hit.Until > _clock()) return hit.Result with { Title = title, Artist = artist };
+            // one request per song, however many phones or widgets ask at once: the lookup is started under the lock, so
+            // only one caller starts it and the others wait for that one. A finished lookup that is still listed has had
+            // its answer cached (LookUp caches before it completes), and that answer has expired since: start a new one.
+            if (!_pending.TryGetValue(key, out var running) || running.IsCompleted)
             {
-                _pending.TryRemove(new KeyValuePair<string, Task<LyricsResult>>(key, task));
-                continue;
+                running = Task.Run(() => LookUp(title, artist, album, seconds));
+                _pending[key] = running;
+                // forgotten once it is done (only this lookup: a newer one for the same song stays)
+                _ = running.ContinueWith(done =>
+                {
+                    lock (_gate)
+                        if (_pending.TryGetValue(key, out var listed) && listed == done) _pending.Remove(key);
+                }, TaskScheduler.Default);
             }
-            // forgotten once it is done (only this task: a newer one for the same song stays)
-            _ = task.ContinueWith(done => _pending.TryRemove(new KeyValuePair<string, Task<LyricsResult>>(key, done)), TaskScheduler.Default);
-            var result = await task.WaitAsync(ct);
-            return result with { Title = title, Artist = artist };
+            task = running;
         }
+        // a phone that gives up stops waiting; the lookup itself is not cancelled, the others still get it
+        var result = await task.WaitAsync(ct);
+        return result with { Title = title, Artist = artist };
     }
 
     private async Task<LyricsResult> LookUp(string title, string artist, string album, int seconds)
@@ -111,8 +115,9 @@ public sealed partial class LyricsService : IDisposable
                 // 1, 2, 4… minutes after failures in a row, at most 30; longer when LRCLIB's Retry-After asks for it
                 _failures = Math.Min(_failures + 1, 16);
                 keep = Math.Min(FirstBackoffMs << (_failures - 1), MaxBackoffMs);
-                if (ex is LrclibRefusedException { RetryAfter: { } wait }) keep = Math.Clamp((long)wait.TotalMilliseconds, keep, 6 * 3600_000L);
-                _quietUntil = _clock() + keep;
+                if (ex is LrclibRefusedException { RetryAfter: { } wait }) keep = Math.Max((long)wait.TotalMilliseconds, keep);
+                // two lookups failing at once: the longer wait (an earlier Retry-After, say) stands
+                _quietUntil = Math.Max(_quietUntil, _clock() + keep);
             }
         }
         return Remember(title, artist, album, seconds, result, keep);

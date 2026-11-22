@@ -29,8 +29,7 @@ export function lyricAt(lines, ms) {
 // Synced lyrics: the words of the song playing on the computer, the line being sung lit and kept in the middle. Timed
 // lyrics follow the position; plain ones are shown as a page, and so are timed ones when the player reports no position
 // (a note says why). The agent asks LRCLIB (free, no account) once per song, and only for a widget whose own "Look up
-// lyrics on LRCLIB" is on (the default; it can be turned off): the phone names the widget, and the agent checks that
-// widget's option.
+// lyrics on LRCLIB" is turned on (off by default): the phone names the widget, and the agent checks that widget's option.
 W.lyrics = {
   needs: ['state', 'fast'],
   create(box, { o, page, w }) {
@@ -41,7 +40,7 @@ W.lyrics = {
     box.append(h('div', 'w-title', o.title || t('w.lyrics.title')), list, note, h('div', 'ly-credit', 'LRCLIB'));
     const offset = Number(o.offset) || 0; // ms: a positive value shows the lines earlier
     const plainToo = o.plain !== false;
-    let track = '', result = null, lines = [], rows = [], shown = -2, loading = false, retryAt = 0, timedShown = null;
+    let track = '', result = null, lines = [], rows = [], shown = -2, loading = false, retryAt = 0, timedShown = null, requestGen = 0;
     const trackKey = (m) => (m?.title ? [m.app, m.title, m.artist, m.durMs].join('\n') : '');
     // a player that reports no timeline (no length) gives no position to follow
     const hasPosition = () => Number(media?.durMs) > 0;
@@ -92,13 +91,15 @@ W.lyrics = {
       if (jump) list.scrollTop = top; else list.scrollTo?.({ top, behavior: 'smooth' });
     };
     const fetchFor = async (key) => {
+      // only the newest request counts: after A → B → A, the first request for A must not overwrite the second's answer
+      const gen = ++requestGen;
       // each widget keeps to its own option, even when another one on the page has the lookup on
-      if (o.lookup === false) { loading = false; result = { status: 'off' }; lines = []; paint(); return; }
+      if (o.lookup !== true) { loading = false; result = { status: 'off' }; lines = []; paint(); return; }
       loading = true; result = null; lines = []; paint();
       let answer;
       try { answer = await api(`/lyrics?${wq}`, 'GET', 20_000); }
       catch (_) { answer = { status: 'error' }; }
-      if (key !== track) return; // the song changed meanwhile: its own request is under way
+      if (gen !== requestGen || key !== track) return; // a newer request (or another song) is under way
       loading = false;
       result = answer && typeof answer === 'object' ? answer : { status: 'error' };
       if (result.status === 'error') retryAt = Date.now() + 30_000;

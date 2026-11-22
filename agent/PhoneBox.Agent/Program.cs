@@ -689,7 +689,7 @@ app.MapGet("/api/steam/avatar", async (string id, SteamMonitor steam, Cancellati
         ? Results.File(img.Data, img.Type, lastModified: null, entityTag: null, enableRangeProcessing: false) : Results.NotFound());
 
 // Synced lyrics of the track playing now, from LRCLIB, for the asking widget ("widget=pageId/widgetId"): only when that
-// widget is on an enabled page with "Look up lyrics on LRCLIB" on (the default; it can be turned off). The track is the agent's own media
+// widget is on an enabled page with "Look up lyrics on LRCLIB" turned on (off by default). The track is the agent's own media
 // snapshot: the phone sends no text that could reach LRCLIB.
 app.MapGet("/api/lyrics", async (string? widget, HttpRequest req, MediaMonitor media, LyricsService lyrics, CancellationToken ct) =>
     Results.Json(await lyrics.ForAsync(media.Snapshot(), req.Headers["X-PhoneBox-Device"].ToString(), widget, ct)));

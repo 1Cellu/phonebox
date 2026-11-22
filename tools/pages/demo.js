@@ -610,8 +610,7 @@
     // timed lyrics for the first made-up song, plain ones for the second, none for the third (LRCLIB is not asked)
     if (path === '/api/lyrics') {
       // the asking widget's own lookup option, like the agent (PanelWidgets.Find): another widget's does not count
-      const asking = panelWidget(await config(), q.get('widget'), 'lyrics');
-      if (!asking || asking.options?.lookup === false) return json({ status: 'off' });
+      if (panelWidget(await config(), q.get('widget'), 'lyrics')?.options?.lookup !== true) return json({ status: 'off' });
       const [title, artist] = TRACKS[player.track];
       const stamp = (s) => `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}.00]`;
       if (player.track === 0) return json({ status: 'ok', title, artist, synced: DEMO_LYRICS.map(([s, l]) => `${stamp(s)} ${l}`).join('\n'), plain: DEMO_LYRICS.map((x) => x[1]).join('\n'), instrumental: false });

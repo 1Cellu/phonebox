@@ -54,12 +54,12 @@ test('the Synced lyrics widget follows the song, shows plain lyrics and says whe
   expect(errors).toEqual([]);
 });
 
-test('the lookup is on for a new widget and stops when the widget turns it off', async ({ page }) => {
+test('lyrics are looked up only with the lookup option turned on', async ({ page }) => {
   await showPage(page, [{ id: 'c', type: 'clock', x: 0, y: 0, w: 6, h: 4 }]);
   expect((await page.evaluate(() => fetch('/agent/api/lyrics?widget=test%2Fc').then((r) => r.json()))).status).toBe('off');
-  // a widget whose settings don't mention the option looks the lyrics up (the catalog's default)
+  // a widget whose settings don't mention the option has it off (the catalog's default)
   await showPage(page, [{ id: 'l', type: 'lyrics', x: 0, y: 0, w: 12, h: 6 }]);
-  await expect(page.locator('.w-lyrics')).toHaveClass(/timed/);
+  await expect(page.locator('.w-lyrics .ly-note')).toHaveText('Turn on “Look up lyrics on LRCLIB” in this widget’s options');
   await showPage(page, [{ id: 'l', type: 'lyrics', x: 0, y: 0, w: 12, h: 6, options: { lookup: false } }]);
   await expect(page.locator('.w-lyrics .ly-note')).toHaveText('Turn on “Look up lyrics on LRCLIB” in this widget’s options');
   await expect(page.locator('.w-lyrics .ly-line')).toHaveCount(0);
@@ -123,4 +123,39 @@ test('the widget speaks the panel language', async ({ page }) => {
   await showPage(page, [{ id: 'l', type: 'lyrics', x: 0, y: 0, w: 12, h: 6, options: { lookup: false } }], { language: 'vi' });
   await expect(page.locator('.w-lyrics .w-title')).toHaveText('Lời bài hát đồng bộ');
   await expect(page.locator('.w-lyrics .ly-note')).toHaveText('Bật “Tra lời bài hát trên LRCLIB” trong tùy chọn của widget này');
+});
+
+test('an answer to an older request does not replace the newer one (A → B → A)', async ({ page }) => {
+  const errors = watchErrors(page);
+  await showPage(page, [{ id: 'l', type: 'lyrics', x: 0, y: 0, w: 12, h: 6, options: { lookup: true } }]);
+  const lyrics = page.locator('.w-lyrics');
+  await expect(lyrics).toHaveClass(/timed/);
+  // the next request is slow and ends in an error; the ones after it answer at once
+  await page.evaluate(() => {
+    const real = window.fetch;
+    let slowOne = true;
+    window.fetch = (url, ...rest) => {
+      if (slowOne && String(url).includes('/api/lyrics')) {
+        slowOne = false;
+        return new Promise((resolve) => {
+          window.__answerSlowOne = () => resolve(new Response(JSON.stringify({ status: 'error' }), { headers: { 'content-type': 'application/json' } }));
+        });
+      }
+      return real(url, ...rest);
+    };
+  });
+  const media = (action) => page.evaluate((action) => fetch('/agent/api/media/' + action, { method: 'POST' }), action);
+  await media('next'); // song B: the slow request
+  await expect.poll(() => page.evaluate(() => typeof window.__answerSlowOne)).toBe('function');
+  await media('prev'); // back to A
+  await expect(lyrics).toHaveClass(/timed/, { timeout: 8000 });
+  await media('next'); // B again: plain lyrics, from a new request
+  await expect(lyrics).toHaveClass(/plain/, { timeout: 8000 });
+  await expect(lyrics.locator('.ly-note')).toHaveText('These lyrics are not timed');
+  // the first request for B answers late, with an error: it is ignored
+  await page.evaluate(() => window.__answerSlowOne());
+  await page.waitForTimeout(500);
+  await expect(lyrics).toHaveClass(/plain/);
+  await expect(lyrics.locator('.ly-note')).toHaveText('These lyrics are not timed');
+  expect(errors).toEqual([]);
 });

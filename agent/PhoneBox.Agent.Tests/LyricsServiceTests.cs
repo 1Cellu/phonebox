@@ -39,6 +39,12 @@ public sealed class LyricsServiceTests : IDisposable
         }
     }
 
+    /// <summary>An LRCLIB whose answers the test releases when it wants (a slow network).</summary>
+    private sealed class SlowLrclib(Func<HttpRequestMessage, Task<HttpResponseMessage>> answer) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => answer(request);
+    }
+
     private static HttpResponseMessage Json(string json, HttpStatusCode code = HttpStatusCode.OK) =>
         new(code) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
@@ -55,7 +61,7 @@ public sealed class LyricsServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task NothingIsAskedOnceTheWidgetTurnsTheLookupOff()
+    public async Task TheLookupIsOffUntilTheWidgetTurnsItOn()
     {
         var lrclib = new Lrclib(_ => Json("[]"));
         using var lyrics = new LyricsService(Config("lyrics", lookup: false), NullLogger<LyricsService>.Instance, lrclib);
@@ -182,11 +188,11 @@ public sealed class LyricsServiceTests : IDisposable
 
         Assert.Equal("notfound", (await Ask(lyrics, Track("Song", "Artist"), "p/on")).Status);
         Assert.Single(lrclib.Asked);
-        // a widget whose settings don't mention the option has it on (the catalog's default)
-        Assert.True(lyrics.Wanted(null, "p/plain"));
-        Assert.Equal("notfound", (await Ask(lyrics, Track("Other", "Artist"), "p/plain")).Status);
-        Assert.Equal(2, lrclib.Asked.Count);
-        Assert.False(lyrics.Wanted(null, "p/off"));
+        // a widget whose settings don't mention the option has it off (the catalog's default)
+        Assert.False(lyrics.Wanted(null, "p/plain"));
+        Assert.Equal("off", (await Ask(lyrics, Track("Other", "Artist"), "p/plain")).Status);
+        Assert.Single(lrclib.Asked);
+        Assert.True(lyrics.Wanted(null, "p/on"));
     }
 
     [Fact]
@@ -251,5 +257,91 @@ public sealed class LyricsServiceTests : IDisposable
         now += LyricsService.FirstBackoffMs + 1;
         await Ask(lyrics, Track("D", "Artist"));
         Assert.Equal(4, lrclib.Asked.Count);
+    }
+
+    [Fact]
+    public async Task PhonesAskingAtOnceShareOneLookup()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var asked = 0;
+        var lrclib = new SlowLrclib(async _ =>
+        {
+            Interlocked.Increment(ref asked);
+            await release.Task;
+            return Json("[]");
+        });
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib);
+
+        var asks = Enumerable.Range(0, 20).Select(_ => Task.Run(() => Ask(lyrics, Track("Song", "Artist")))).ToArray();
+        // a phone that gives up stops waiting, without cancelling the lookup the others wait for
+        using var gaveUp = new CancellationTokenSource();
+        var impatient = lyrics.ForAsync(Track("Song", "Artist"), null, "p/w", gaveUp.Token);
+        await Task.Delay(200);
+        gaveUp.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => impatient);
+
+        release.SetResult();
+        var results = await Task.WhenAll(asks);
+        Assert.All(results, r => Assert.Equal("notfound", r.Status));
+        Assert.Equal(1, Volatile.Read(ref asked));
+    }
+
+    [Fact]
+    public async Task ARetryAfterLongerThanTheBackOffIsHonouredInFull()
+    {
+        long now = 0;
+        var lrclib = new Lrclib(_ =>
+        {
+            var res = Json("""{"message":"come back tomorrow"}""", HttpStatusCode.TooManyRequests);
+            res.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromHours(24));
+            return res;
+        });
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib, () => now);
+        await Ask(lyrics, Track("A", "Artist"));
+        now = 23 * 3600_000L;
+        await Ask(lyrics, Track("B", "Artist"));
+        Assert.Single(lrclib.Asked);
+        now = 24 * 3600_000L + 1;
+        await Ask(lyrics, Track("C", "Artist"));
+        Assert.Equal(2, lrclib.Asked.Count);
+    }
+
+    [Fact]
+    public async Task TwoFailuresAtOnceKeepTheLongerWait()
+    {
+        long now = 0;
+        var gates = new Dictionary<string, TaskCompletionSource<HttpResponseMessage>>
+        {
+            ["A"] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            ["B"] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var asked = new List<string>();
+        var lrclib = new SlowLrclib(req =>
+        {
+            lock (asked) asked.Add(req.RequestUri!.Query);
+            return gates[req.RequestUri!.Query.Contains("track_name=A") ? "A" : "B"].Task;
+        });
+        using var lyrics = new LyricsService(Config("lyrics"), NullLogger<LyricsService>.Instance, lrclib, () => now);
+
+        // both lookups are under way before either fails
+        var a = Ask(lyrics, Track("A", "Artist"));
+        var b = Ask(lyrics, Track("B", "Artist"));
+        for (var waited = 0; ; waited += 10)
+        {
+            lock (asked) if (asked.Count == 2) break;
+            Assert.True(waited < 5000, "both requests should reach LRCLIB");
+            await Task.Delay(10);
+        }
+        var slowDown = Json("{}", HttpStatusCode.TooManyRequests);
+        slowDown.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromMinutes(10));
+        gates["A"].SetResult(slowDown);
+        Assert.Equal("error", (await a).Status);
+        gates["B"].SetResult(Json("oops", HttpStatusCode.ServiceUnavailable)); // a later failure with a shorter back-off
+        Assert.Equal("error", (await b).Status);
+
+        // the 10 minutes LRCLIB asked for still stand: another song five minutes later is not asked for
+        now = 5 * 60_000;
+        Assert.Equal("error", (await Ask(lyrics, Track("C", "Artist"))).Status);
+        Assert.Equal(2, asked.Count);
     }
 }
